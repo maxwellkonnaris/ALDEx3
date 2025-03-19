@@ -1,34 +1,70 @@
 ##' ALDEx3 Linear Models
 ##'
 ##' 
-##' @title ALDEx3 Linear Modles
-##' @param counts an (D x N) matrix of sequence count, N is number of samples, D
-##'   is number of taxa or genes
-##' @param X either a formula (in which case DATA must be non-null) or a model
-##'   matrix of dimension P x N (P is number of linear model covariates). If a
-##'   formula is passed it should not include the target Y, e.g., should simply
-##'   be "~condition-1" (note the lack of the left hand side).
-##' @param data a data frame for use with formula, must have N rows
-##' @param nsample number of monte carlo replicates
-##' @param GAMMA the scale model, can be a function or an N x nsample matrix. If
-##'   a function is passed, it should take one argument (pi) which is a N x D x
-##'   nsample array of log-transformed relative abundances. That function must
-##'   in turn output an N x nsample matrix of scale samples on the log2 scale.
-##' @param streamsize (default 8000) memory footprint (approximate) at which to
-##'   use streaming. This should be thought of as the number of Mb for each
+##' @title ALDEx3 Linear Modules
+##' @param Y An (D x N) matrix of sequence counts where D is the number of features (taxa/genes) and N is the number of samples
+##' @param X Either a formula (requires non-null data parameter) or a model matrix (P x N) where P is the number of linear model covariates
+##' @param data Data frame containing variables in formula X (must have N rows)
+##' @param nsample Number of Monte Carlo replicates for Dirichlet sampling
+##' @param GAMMA Scale model specification. Can be either:
+##' \itemize{
+##'   \item A function taking arguments (X, Y, logWpara) that returns an (N x nsample) matrix of scale factors on log2 scale
+##'   \item An (N x nsample) matrix of pre-computed scale factors
+##' }
+##' @param streamsize Approximate memory footprint in Mb when using streaming (default 8000). Set to Inf to disable streaming.
+##'   This should be thought of as the number of Mb for each
 ##'   streaming chunk. If D*N*nsample*8/1000000 is less than streamsize then no
 ##'   streaming will be performed. Note, to conserve memory, samples from the
 ##'   Dirichlet and scale models will not be returned if streaming is used.
-##'   Streaming can be turned off by setting streamsize=Inf.
 ##' @param return.samples (default TRUE) if true, return samples for logWpara
 ##'   composition and logWperp (scale). Will override to FALSE if streaming is
 ##'   required.
-##' @param p.adjust.method (default BH) The method for multiple hypothesis test
-##'   correction. See `p.adjust` for all available methods.
-##' @return List with elements estimate (P x D x nsample array), std.error (P x
-##'   D x nsample array), and p.val (P x D matrix) summarizing over the
-##'   posterior. TODO p.value calcluation may be slightly different than in
-##'   current ALDEx3 -- need to check.
+##' @param p.adjust.method Multiple testing correction method (default "BH"). See \code{p.adjust} for options.
+##' @return A list containing:
+##' \itemize{
+##'   \item estimate - (P x D x nsample) array of coefficient estimates
+##'   \item std.error - (P x D x nsample) array of standard errors
+##'   \item p.val - (P x D) matrix of adjusted p-values
+##' }
+##' TODO p.value calcluation may be slightly different than in current ALDEx3 -- need to check.
+##' 
+##' @export
+##' @examples
+##' set.seed(43254)
+##' 
+##' # Simulation parameters
+##' N <- 300
+##' D <- 100
+##' DE <- 40
+##' mc.samples <- 200
+##' 
+##' # Create metadata (2-group design)
+##' metadata <- data.frame(condition = rep(c("A", "B"), each = N/2))
+##' 
+##' # Simulate baseline abundances
+##' sim_A <- matrix(rnorm(D*N, mean = 5, sd = 2), nrow = D, ncol = N)
+##' 
+##' # Add differential abundance effects
+##' DE_taxa <- sample(1:D, DE)
+##' lfcs <- rnorm(DE, mean = 1, sd = 0.5)
+##' design_matrix <- model.matrix(~condition, metadata)
+##' sim_A[DE_taxa,] <- sim_A[DE_taxa,] + lfcs %*% t(design_matrix[,2])
+##' 
+##' # Generate count data
+##' sim_Y <- apply(2^sim_A, 2, function(x) rmultinom(1, 1e6, prob = x))
+##' 
+##' # Define custom scale model function
+##' gamma_func <- function(X, Y, logWpara) {
+##'   # Create N x nsample matrix of scale factors
+##'   matrix(rnorm(N*mc.samples, mean = 0.5, sd = 0.5), nrow = N, ncol = mc.samples)
+##' }
+##' 
+##' # Run ALDEx3 analysis
+##' aldex3.res <- aldex.lm(sim_Y, ~condition, data = metadata, 
+##'                       nsample = mc.samples, GAMMA = gamma_func)
+##'                       
+##' # Extract mean coefficients
+##' coef_means <- apply(aldex3.res$estimate, c(1,2), mean)
 ##' @export
 ##' @author Justin Silverman
 aldex.lm <- function(Y, X, data=NULL, nsample=2000,  GAMMA=NULL,
@@ -44,10 +80,25 @@ aldex.lm <- function(Y, X, data=NULL, nsample=2000,  GAMMA=NULL,
   ## compute model matrix
   if (inherits(X, "formula")) {
     if (is.null(data)) stop("data should not be null if X is a formula")
+    
     X <- t(model.matrix(X, data))
-    ## some error checking to make sure whats returned has right dimensions
-  } 
-
+    
+    ## Error checking
+    if (!is.matrix(X)) stop("model.matrix() did not return a matrix")
+    if (ncol(X) != ncol(Y)) stop(paste("Mismatch: X must have", ncol(Y), "rows to match Y's samples, but has", ncol(X)))
+    if (nrow(X) == 0) stop("Error: model matrix X has zero columns, ensure your formula includes valid predictors.")
+  } else {
+    ## Ensure X is a matrix
+    if (!is.matrix(X)) stop("X must be a formula or a design matrix")
+    
+    ## Check dimensions
+    if (ncol(X) != ncol(Y)) stop(paste("Mismatch: X must have", ncol(Y), "rows to match Y's samples, but has", ncol(X)))
+    if (nrow(X) == 0) stop("Error: Design matrix X has zero columns, ensure it contains valid predictors.")
+  }
+  
+  ## Ensure numeric values in X
+  if (!all(is.numeric(X))) stop("Error: X contains non-numeric values. Ensure all covariates are numerical.")
+  
   ## perform streaming 
   out <- list()
   nsample.remaining <- nsample
@@ -110,8 +161,37 @@ aldex.lm.internal <- function(Y, X, nsample, GAMMA=NULL, stream) {
     stop("You probably want a scale model :)")
   } else if (is.function(GAMMA)) {
     logWperp <- GAMMA(X, Y, logWpara)
-    ## some error checking to make sure whats returned has right dimensions
-  } 
+  } else if (is.matrix(GAMMA)) { 
+    logWperp <- GAMMA
+  }
+  
+  ## Correct Dimensions Check
+  expected_dim <- c(ncol(Y), nsample)  
+  actual_dim <- dim(logWperp)
+  
+  if (!all(actual_dim == expected_dim)) {
+    stop(paste0("GAMMA function returned wrong dimensions. Expected: ", 
+                paste(expected_dim, collapse=" x "), 
+                " received: ", paste(actual_dim, collapse=" x ")))
+  }
+  
+  # Reasonable biological range check for log2 
+  if (any(abs(logWperp) > 10)) {
+    warning(paste(
+      "|log2 scale factors| >10 detected in", sum(abs(logWperp) > 10), "cases.",
+      "Verify these are intentional and that GAMMA function outputs 
+      or GAMMA matrix contains log2 values."
+    ))
+  }
+  
+  # Natural log mistake check (ln(2) ≈ 0.693 threshold)
+  if (median(abs(logWperp)) < 1 && max(abs(logWperp)) > 5) {
+    warning(paste(
+      "Suspicious scale distribution detected.",
+      "Are you certain GAMMA values are log2 (not natural log)?",
+      "Median:|", round(median(abs(logWperp)), 2), "| Max:|", round(max(abs(logWperp)), 2), "|"
+    ))
+  }
 
   ## compute scaled abundances (W)
   logW <- sweep(logWpara, c(2,3), logWperp, FUN=`+`)

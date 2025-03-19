@@ -2,7 +2,7 @@
 % Please edit documentation in R/aldex.R
 \name{aldex.lm}
 \alias{aldex.lm}
-\title{ALDEx3 Linear Modles}
+\title{ALDEx3 Linear Modules}
 \usage{
 aldex.lm(
   Y,
@@ -16,45 +16,80 @@ aldex.lm(
 )
 }
 \arguments{
-\item{X}{either a formula (in which case DATA must be non-null) or a model
-matrix of dimension P x N (P is number of linear model covariates). If a
-formula is passed it should not include the target Y, e.g., should simply
-be "~condition-1" (note the lack of the left hand side).}
+\item{Y}{An (D x N) matrix of sequence counts where D is the number of features (taxa/genes) and N is the number of samples}
 
-\item{data}{a data frame for use with formula, must have N rows}
+\item{X}{Either a formula (requires non-null data parameter) or a model matrix (P x N) where P is the number of linear model covariates}
 
-\item{nsample}{number of monte carlo replicates}
+\item{data}{Data frame containing variables in formula X (must have N rows)}
 
-\item{GAMMA}{the scale model, can be a function or an N x nsample matrix. If
-a function is passed, it should take one argument (pi) which is a N x D x
-nsample array of log-transformed relative abundances. That function must
-in turn output an N x nsample matrix of scale samples on the log2 scale.}
+\item{nsample}{Number of Monte Carlo replicates for Dirichlet sampling}
 
-\item{streamsize}{(default 8000) memory footprint (approximate) at which to
-use streaming. This should be thought of as the number of Mb for each
+\item{GAMMA}{Scale model specification. Can be either:
+\itemize{
+\item A function taking arguments (X, Y, logWpara) that returns an (N x nsample) matrix of scale factors on log2 scale
+\item An (N x nsample) matrix of pre-computed scale factors
+}}
+
+\item{streamsize}{Approximate memory footprint in Mb when using streaming (default 8000). Set to Inf to disable streaming.
+This should be thought of as the number of Mb for each
 streaming chunk. If D\emph{N}nsample*8/1000000 is less than streamsize then no
 streaming will be performed. Note, to conserve memory, samples from the
-Dirichlet and scale models will not be returned if streaming is used.
-Streaming can be turned off by setting streamsize=Inf.}
+Dirichlet and scale models will not be returned if streaming is used.}
 
 \item{return.samples}{(default TRUE) if true, return samples for logWpara
 composition and logWperp (scale). Will override to FALSE if streaming is
 required.}
 
-\item{p.adjust.method}{(default BH) The method for multiple hypothesis test
-correction. See \code{p.adjust} for all available methods.}
-
-\item{counts}{an (D x N) matrix of sequence count, N is number of samples, D
-is number of taxa or genes}
+\item{p.adjust.method}{Multiple testing correction method (default "BH"). See \code{p.adjust} for options.}
 }
 \value{
-List with elements estimate (P x D x nsample array), std.error (P x
-D x nsample array), and p.val (P x D matrix) summarizing over the
-posterior. TODO p.value calcluation may be slightly different than in
-current ALDEx3 -- need to check.
+A list containing:
+\itemize{
+\item estimate - (P x D x nsample) array of coefficient estimates
+\item std.error - (P x D x nsample) array of standard errors
+\item p.val - (P x D) matrix of adjusted p-values
+}
+TODO p.value calcluation may be slightly different than in current ALDEx3 -- need to check.
 }
 \description{
 ALDEx3 Linear Models
+}
+\examples{
+set.seed(43254)
+
+# Simulation parameters
+N <- 300
+D <- 100
+DE <- 40
+mc.samples <- 200
+
+# Create metadata (2-group design)
+metadata <- data.frame(condition = rep(c("A", "B"), each = N/2))
+
+# Simulate baseline abundances
+sim_A <- matrix(rnorm(D*N, mean = 5, sd = 2), nrow = D, ncol = N)
+
+# Add differential abundance effects
+DE_taxa <- sample(1:D, DE)
+lfcs <- rnorm(DE, mean = 1, sd = 0.5)
+design_matrix <- model.matrix(~condition, metadata)
+sim_A[DE_taxa,] <- sim_A[DE_taxa,] + lfcs \%*\% t(design_matrix[,2])
+
+# Generate count data
+sim_Y <- apply(2^sim_A, 2, function(x) rmultinom(1, 1e6, prob = x))
+
+# Define custom scale model function
+gamma_func <- function(X, Y, logWpara) {
+  # Create N x nsample matrix of scale factors
+  matrix(rnorm(N*mc.samples, mean = 0.5, sd = 0.5), nrow = N, ncol = mc.samples)
+}
+
+# Run ALDEx3 analysis
+aldex3.res <- aldex.lm(sim_Y, ~condition, data = metadata, 
+                      nsample = mc.samples, GAMMA = gamma_func)
+                      
+# Extract mean coefficients
+coef_means <- apply(aldex3.res$estimate, c(1,2), mean)
 }
 \author{
 Justin Silverman
